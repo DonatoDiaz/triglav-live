@@ -59,5 +59,6 @@ qemu-system-x86_64 -m 4096 -enable-kvm \
 
 ## CI
 
-`.github/workflows/build-iso.yml` собирает ISO в контейнере `archlinux:latest`
-на каждый push/PR и прикрепляет артефакт. На тег `v*` создаётся релиз.
+Workflow лежит в `ci/build-iso.yml`; включение и ограничения токена описаны в
+`docs/CI.md`. Он собирает ISO в контейнере `archlinux:latest` и прикрепляет
+артефакт. На тег `v*` создаётся релиз с ISO.

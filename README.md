@@ -98,8 +98,8 @@ profile/overlay/          всё, что попадает в airootfs
   etc/                    motd, issue, shell, конфиги
   opt/triglav/AGENTS.md   инструкции для AI-агента
 docker/entrypoint.sh      mkarchiso внутри контейнера
-.github/workflows/        сборка ISO в CI
-docs/                     сборка, использование, AI
+ci/build-iso.yml          workflow для GitHub Actions (см. docs/CI.md)
+docs/                     сборка, использование, AI, CI
 ```
 
 ## Безопасность
