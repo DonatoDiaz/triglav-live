@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# TriglavCode launcher for Triglav Live.
+set -euo pipefail
+BIN="${TRIGLAVCODE_BIN:-/opt/triglavcode/triglavcode}"
+
+if [[ -f /root/.config/triglav/ai.env ]]; then
+  # shellcheck disable=SC1091
+  source /root/.config/triglav/ai.env
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  triglav-code-fetch || {
+    echo "TriglavCode не установлен. Запустите: triglav-code-fetch" >&2
+    exit 1
+  }
+fi
+
+exec "$BIN" "$@"

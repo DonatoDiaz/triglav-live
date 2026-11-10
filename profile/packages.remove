@@ -1,0 +1,74 @@
+# Packages from the releng profile we do not need in a compact rescue image.
+# Applied after packages.add, before pacstrap.
+
+# installers / cloning suites
+archinstall
+clonezilla
+drbl
+partclone
+partimage
+fsarchiver
+
+# cloud / VM guest agents
+cloud-init
+virtualbox-guest-utils-nox
+open-vm-tools
+qemu-guest-agent
+hyperv
+
+# accessibility / speech
+brltty
+espeakup
+espeak-ng
+
+# boot extras we do not use
+refind
+memtest86+
+memtest86+-efi
+edk2-shell
+
+# VPN / modem / mobile tethering
+openconnect
+openvpn
+vpnc
+pptpclient
+xl2tpd
+wvdial
+ppp
+modemmanager
+usb_modeswitch
+usbmuxd
+
+# network storage / SAN
+nfs-utils
+nfsidmap
+open-iscsi
+nbd
+rpcbind
+
+# rare filesystems / partitioning extras
+nilfs-utils
+jfsutils
+udftools
+bcachefs-tools
+dmraid
+gpart
+fatresize
+b43-fwcutter
+
+# browsers / IRC / multiplexers / extra shells
+irssi
+lynx
+mc
+lftp
+screen
+
+# terminal terminfo for terminals not shipped
+kitty-terminfo
+ghostty-terminfo
+foot-terminfo
+rxvt-unicode-terminfo
+kmscon-terminfo
+
+# misc
+darkhttpd

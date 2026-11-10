@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# triglav-net — network helpers for the live environment.
+set -uo pipefail
+source /usr/local/lib/triglav/common.sh
+
+usage() {
+  cat <<'EOF'
+triglav-net — сеть в Triglav Live.
+
+  triglav-net status            состояние интерфейсов и связности
+  triglav-net wifi              интерактивный iwctl
+  triglav-net wifi SSID [pass]  подключиться к Wi-Fi
+  triglav-net wifi-list         список сетей
+  triglav-net dhcp [iface]      получить адрес по DHCP
+  triglav-net test              ping + DNS
+  triglav-net up                поднять iwd и интерфейсы
+EOF
+}
+
+wifi_iface() {
+  iw dev 2>/dev/null | awk '/Interface/{print $2; exit}'
+}
+
+status() {
+  tg_section "Интерфейсы"
+  ip -br address
+  echo
+  tg_section "Маршруты"
+  ip route
+  echo
+  tg_section "Wi-Fi"
+  if [[ -d /sys/class/net ]]; then
+    for w in /sys/class/net/*/wireless; do
+      [[ -e "$w" ]] || continue
+      iface="$(basename "$(dirname "$w")")"
+      echo "  $iface: $(cat "/sys/class/net/$iface/operstate" 2>/dev/null)"
+    done
+  fi
+  tg_have iwctl && iwctl station list 2>/dev/null | sed -n '1,20p'
+  echo
+  tg_section "Связность"
+  ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1 && tg_ok "ICMP 1.1.1.1 ok" || tg_warn "нет ICMP"
+  getent hosts archlinux.org >/dev/null 2>&1 && tg_ok "DNS ok" || tg_warn "DNS не работает"
+}
+
+up() {
+  tg_need_root "$@"
+  systemctl start iwd 2>/dev/null || true
+  rfkill unblock wifi 2>/dev/null || true
+  for w in /sys/class/net/*/wireless; do
+    [[ -e "$w" ]] || continue
+    iface="$(basename "$(dirname "$w")")"
+    ip link set "$iface" up 2>/dev/null && tg_dim "  $iface up"
+  done
+  for e in /sys/class/net/e*; do
+    [[ -e "$e" ]] || continue
+    iface="$(basename "$e")"
+    [[ "$iface" == "lo" ]] && continue
+    ip link set "$iface" up 2>/dev/null && tg_dim "  $iface up"
+  done
+  tg_ok "интерфейсы подняты"
+}
+
+wifi_connect() {
+  tg_need_root "$@"
+  local ssid="${1:-}" pass="${2:-}" iface
+  iface="$(wifi_iface)"
+  [[ -n "$iface" ]] || { tg_err "Wi-Fi адаптер не найден"; return 1; }
+  up
+  if [[ -z "$ssid" ]]; then
+    exec iwctl
+  fi
+  if [[ -n "$pass" ]]; then
+    iwctl --passphrase "$pass" station "$iface" connect "$ssid"
+  else
+    iwctl station "$iface" connect "$ssid"
+  fi
+}
+
+dhcp() {
+  tg_need_root "$@"
+  local iface="${1:-}"
+  if [[ -z "$iface" ]]; then
+    iface="$(ip -br link | awk '$2=="UP" && $1!="lo"{print $1; exit}')"
+  fi
+  [[ -n "$iface" ]] || { tg_err "нет активного интерфейса"; return 1; }
+  tg_info "DHCP на $iface"
+  dhcpcd -n "$iface" 2>/dev/null || dhcpcd "$iface"
+  ip -br address show "$iface"
+}
+
+test_net() {
+  ping -c 2 -W 2 1.1.1.1
+  getent hosts archlinux.org || tg_warn "DNS не отвечает"
+}
+
+case "${1:-status}" in
+  -h|--help|help) usage ;;
+  status) status ;;
+  up) up ;;
+  wifi)
+    shift
+    wifi_connect "$@"
+    ;;
+  wifi-list)
+    up
+    iwctl station "$(wifi_iface)" scan 2>/dev/null
+    sleep 2
+    iwctl station "$(wifi_iface)" get-networks 2>/dev/null
+    ;;
+  dhcp)
+    shift
+    dhcp "$@"
+    ;;
+  test) test_net ;;
+  *) usage; exit 1 ;;
+esac

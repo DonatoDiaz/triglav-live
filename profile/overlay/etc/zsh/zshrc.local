@@ -1,0 +1,22 @@
+# Triglav Live zsh customisation (sourced by grml-zsh-config).
+# grml sets its prompt from a precmd hook, so override it there.
+triglav_precmd() {
+  PROMPT='%F{141}triglav%f %F{103}%~%f %F{99}❯%f '
+  RPROMPT=''
+}
+if [[ -n ${precmd_functions+x} ]]; then
+  precmd_functions+=(triglav_precmd)
+else
+  precmd_functions=(triglav_precmd)
+fi
+
+alias ll='ls -lah --color=auto'
+alias d='triglav-doctor'
+alias fix='triglav-repair'
+alias mnt='triglav-mount'
+alias ask='triglav-ask'
+alias net='triglav-net'
+alias ai='triglav-ai-setup'
+
+export EDITOR=nano
+export PAGER=less

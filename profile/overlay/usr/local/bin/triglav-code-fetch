@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# triglav-code-fetch — download the TriglavCode binary on demand.
+set -euo pipefail
+source /usr/local/lib/triglav/common.sh
+
+BIN_DIR="${TRIGLAVCODE_DIR:-/opt/triglavcode}"
+BIN="$BIN_DIR/triglavcode"
+CONF="/etc/triglav/triglavcode.conf"
+
+REPO="DonatoDiaz/triglavcode"
+TAG="latest"
+[[ -f "$CONF" ]] && source "$CONF"
+REPO="${TRIGLAVCODE_REPO:-$REPO}"
+TAG="${TRIGLAVCODE_TAG:-$TAG}"
+
+if [[ -x "$BIN" ]]; then
+  tg_ok "TriglavCode уже установлен: $BIN"
+  exit 0
+fi
+
+tg_need_root "$@"
+mkdir -p "$BIN_DIR"
+
+# Prefer a tarball on a mounted USB or a local path.
+if [[ -n "${TRIGLAVCODE_TARBALL:-}" && -f "${TRIGLAVCODE_TARBALL}" ]]; then
+  SRC="$TRIGLAVCODE_TARBALL"
+else
+  if ! tg_have curl || ! tg_have jq; then
+    tg_err "нужны curl и jq (triglav-tools install curl jq)"
+    exit 1
+  fi
+  tg_info "ищу релиз ${REPO}@${TAG}"
+  API="https://api.github.com/repos/${REPO}/releases"
+  if [[ "$TAG" == "latest" ]]; then
+    META="$(curl -fsSL "$API/latest")"
+  else
+    META="$(curl -fsSL "$API/tags/${TAG}")"
+  fi
+  URL="$(printf '%s' "$META" | jq -r '[.assets[]? | select(.name | endswith("linux-x64.tar.gz"))][0].browser_download_url // empty')"
+  [[ -n "$URL" ]] || { tg_err "не найден linux-x64.tar.gz в релизе"; exit 1; }
+
+  FREE_KB="$(df -Pk "$BIN_DIR" | awk 'NR==2{print $4}')"
+  if (( FREE_KB < 350000 )); then
+    tg_err "мало места в $BIN_DIR (нужно ~350 МБ, есть $((FREE_KB/1024)) МБ)"
+    exit 1
+  fi
+
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  tg_info "скачиваю $URL"
+  curl -fL --retry 3 --progress-bar -o "$TMP/tc.tar.gz" "$URL"
+  SRC="$TMP/tc.tar.gz"
+fi
+
+TMPX="$(mktemp -d)"
+trap 'rm -rf "$TMPX"' EXIT
+tar xzf "$SRC" -C "$TMPX"
+D="$(find "$TMPX" -maxdepth 1 -type d -name 'triglavcode-*' | head -1)"
+[[ -n "$D" ]] || { tg_err "неожиданный формат архива"; exit 1; }
+install -m 0755 "$D/triglavcode" "$BIN"
+cp -a "$D/extras" "$BIN_DIR/" 2>/dev/null || true
+cp -a "$D/docs" "$BIN_DIR/" 2>/dev/null || true
+for f in LICENSE NOTICE README.md RELEASE_NOTES.md; do
+  [[ -f "$D/$f" ]] && cp "$D/$f" "$BIN_DIR/"
+done
+tg_ok "установлено: $BIN ($("$BIN" --version 2>/dev/null | head -1))"

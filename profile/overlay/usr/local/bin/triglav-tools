@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# triglav-tools — install extra tools on demand (keeps the ISO compact).
+set -uo pipefail
+source /usr/local/lib/triglav/common.sh
+
+usage() {
+  cat <<'EOF'
+triglav-tools — доустановка пакетов из сети.
+
+  triglav-tools list                 доступные наборы
+  triglav-tools install PKG...       установить пакеты
+  triglav-tools group GROUP          установить набор
+  triglav-tools search TERM          искать в репозиториях
+  triglav-tools update               pacman -Syu (может ломать live-сессию)
+  triglav-tools clean                очистить кэш пакетов
+
+ВНИМАНИЕ: изменения живут до перезагрузки (overlay в RAM).
+EOF
+}
+
+declare -A TG_GROUPS=(
+  [firmware]="linux-firmware sof-firmware alsa-ucm-conf"
+  [filesystem]="btrfs-progs xfsprogs f2fs-tools ntfs-3g exfatprogs dosfstools"
+  [security]="nmap wireshark-qt john hashcat"
+  [virt]="qemu-full libvirt virt-manager"
+  [gui]="xorg-server xorg-xinit i3-wm alacritty"
+  [editors]="emacs code"
+  [network]="networkmanager nm-connection-editor"
+)
+
+ensure_keyring() {
+  pacman -Sy --needed --noconfirm archlinux-keyring >/dev/null 2>&1 || true
+}
+
+install_pkgs() {
+  tg_need_root "$@"
+  [[ $# -gt 0 ]] || { tg_err "укажите пакеты"; return 1; }
+  tg_info "установка: $*"
+  ensure_keyring
+  if ! pacman -Sy --needed --noconfirm "$@"; then
+    tg_warn "повтор после обновления keyring"
+    pacman-key --init
+    pacman-key --populate archlinux
+    pacman -Sy --needed --noconfirm "$@" || { tg_err "установка не удалась"; return 1; }
+  fi
+  tg_ok "готово: $*"
+}
+
+case "${1:-list}" in
+  -h|--help|help) usage ;;
+  list)
+    tg_section "Наборы"
+    for g in "${!TG_GROUPS[@]}"; do printf '  %-12s %s\n' "$g" "${TG_GROUPS[$g]}"; done
+    echo
+    tg_dim "Загружено пакетов: $(pacman -Q | wc -l)"
+    ;;
+  install)
+    shift
+    install_pkgs "$@"
+    ;;
+  group)
+    g="${2:-}"
+    [[ -n "${TG_GROUPS[$g]:-}" ]] || { tg_err "нет набора: $g"; usage; exit 1; }
+    # shellcheck disable=SC2086
+    install_pkgs ${TG_GROUPS[$g]}
+    ;;
+  search)
+    shift
+    pacman -Ss "$@"
+    ;;
+  update)
+    tg_need_root "$@"
+    pacman -Syu --noconfirm
+    ;;
+  clean)
+    tg_need_root "$@"
+    paccache -rk1 2>/dev/null || rm -rf /var/cache/pacman/pkg/*
+    tg_ok "кэш очищен"
+    ;;
+  *) usage; exit 1 ;;
+esac

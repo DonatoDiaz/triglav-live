@@ -1,0 +1,7 @@
+config.env
+out/
+.build/
+*.iso
+*.iso.sha256
+*.zip
+__pycache__/

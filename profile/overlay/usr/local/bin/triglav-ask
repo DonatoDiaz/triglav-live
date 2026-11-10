@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# triglav-ask — diagnose and repair with one prompt via TriglavCode.
+set -uo pipefail
+source /usr/local/lib/triglav/common.sh
+
+usage() {
+  cat <<'EOF'
+triglav-ask — один промпт: диагностика + план ремонта через TriglavCode.
+
+  triglav-ask "не грузится, висит на Loading Linux..."
+  triglav-ask                  спросить текст интерактивно
+  triglav-ask --short "..."    без полного doctor (быстрее)
+  triglav-ask --save-only "..." только собрать промпт, не запускать AI
+  triglav-ask --auto "..."     разрешить AI выполнять команды без подтверждений
+  triglav-ask --model triglav/gpt-4o-mini "..."
+
+Первый запуск: triglav-ai-setup
+EOF
+}
+
+MODEL="${TRIGLAV_MODEL_ID:-}"
+AUTO=0
+SHORT=0
+SAVE_ONLY=0
+PROBLEM=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --auto) AUTO=1; shift ;;
+    --short) SHORT=1; shift ;;
+    --save-only) SAVE_ONLY=1; shift ;;
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --) shift; PROBLEM="$*"; break ;;
+    *) PROBLEM="${PROBLEM:+$PROBLEM }$1"; shift ;;
+  esac
+done
+
+if [[ -z "$PROBLEM" ]]; then
+  printf '%sОпишите проблему (одна строка, Enter — готово):%s\n' "$C_P" "$C_RESET"
+  IFS= read -r PROBLEM
+fi
+[[ -n "$PROBLEM" ]] || { tg_err "пустой запрос"; exit 1; }
+
+tg_need_root "$@"
+mkdir -p "$TG_REPORT_DIR"
+WORK="/root/triglav-work"
+mkdir -p "$WORK"
+cp -f /opt/triglav/AGENTS.md "$WORK/AGENTS.md" 2>/dev/null || true
+
+if [[ $SHORT -eq 0 ]]; then
+  tg_info "собираю диагностику (triglav-doctor)..."
+  triglav-doctor --stdout > "$WORK/doctor.txt" 2>&1 || true
+else
+  tg_info "быстрая диагностика"
+  {
+    date
+    uname -a
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINT,MODEL
+    blkid
+    df -hT
+    free -h
+    dmesg --level=err,warn --color=never 2>/dev/null | tail -n 40
+  } > "$WORK/doctor.txt" 2>&1
+fi
+
+lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINT,MODEL > "$WORK/lsblk.txt" 2>&1 || true
+
+cat > "$WORK/request.md" <<EOF
+# Запрос на ремонт
+
+**Проблема:** ${PROBLEM}
+
+## Контекст
+
+- Live-среда: Triglav Live ${TG_VERSION}
+- Рабочий каталог: ${WORK}
+- Полный отчёт: ${WORK}/doctor.txt
+- Разметка дисков: ${WORK}/lsblk.txt
+- Установленная система: ${TG_MOUNT} (смонтирована: $(tg_is_mounted "$TG_MOUNT" && echo да || echo нет))
+
+## Что нужно
+
+1. Прочитай doctor.txt и lsblk.txt.
+2. Назови наиболее вероятную причину и риски.
+3. Предложи короткий план (шаги и команды).
+4. Выполни безопасные read-only шаги сам.
+5. Опасные/разрушительные шаги — только после подтверждения пользователя.
+6. Если нужна установленная система — смонтируй её через triglav-mount.
+7. В конце — итог: причина, что сделано, как проверить.
+EOF
+
+PROMPT="$(cat "$WORK/request.md")"
+tg_ok "промпт: $WORK/request.md"
+tg_dim "отчёт:  $WORK/doctor.txt"
+
+if [[ $SAVE_ONLY -eq 1 ]]; then
+  echo
+  cat "$WORK/request.md"
+  exit 0
+fi
+
+if ! command -v triglavcode >/dev/null 2>&1; then
+  tg_err "TriglavCode не найден (triglav-code-fetch)"
+  exit 1
+fi
+
+HAVE_AI=0
+[[ -f /root/.config/triglav/ai.env ]] && HAVE_AI=1
+[[ -f /root/.config/opencode/opencode.jsonc || -f /root/.config/opencode/opencode.json ]] && HAVE_AI=1
+[[ -f /root/.local/share/opencode/auth.json ]] && HAVE_AI=1
+
+if [[ $HAVE_AI -eq 0 ]]; then
+  tg_warn "AI-провайдер не настроен."
+  echo "Настройте: triglav-ai-setup"
+  echo
+  echo "Промпт сохранён: $WORK/request.md"
+  echo "Можно также открыть TUI: cd $WORK && triglavcode"
+  exit 2
+fi
+
+tg_info "запускаю TriglavCode (агент работает в $WORK)"
+ARGS=(run --dir "$WORK" -f "$WORK/doctor.txt" -f "$WORK/lsblk.txt")
+[[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
+[[ $AUTO -eq 1 ]] && ARGS+=(--auto)
+ARGS+=("$PROMPT")
+exec triglavcode "${ARGS[@]}"

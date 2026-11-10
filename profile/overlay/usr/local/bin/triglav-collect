@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# triglav-collect — bundle diagnostics into a single archive for support/AI.
+set -uo pipefail
+source /usr/local/lib/triglav/common.sh
+
+tg_need_root "$@"
+mkdir -p "$TG_REPORT_DIR"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+WORK="$(mktemp -d /tmp/triglav-collect.XXXXXX)"
+OUT="$TG_REPORT_DIR/triglav-collect-$STAMP.tar.gz"
+trap 'rm -rf "$WORK"' EXIT
+
+tg_info "сбор диагностики в $WORK"
+
+{
+  date
+  uname -a
+  cat /etc/os-release
+} > "$WORK/summary.txt" 2>&1
+
+tg_info "doctor"
+triglav-doctor --stdout > "$WORK/doctor.txt" 2>&1 || true
+tg_info "lsblk / blkid / mount"
+lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,UUID,PARTUUID,MOUNTPOINT,MODEL > "$WORK/lsblk.txt" 2>&1 || true
+blkid > "$WORK/blkid.txt" 2>&1 || true
+cat /proc/mounts > "$WORK/mounts.txt" 2>&1 || true
+cat /proc/mdstat > "$WORK/mdstat.txt" 2>&1 || true
+dmsetup ls --tree > "$WORK/dmsetup.txt" 2>&1 || true
+
+tg_info "dmesg / journal"
+dmesg --color=never > "$WORK/dmesg.txt" 2>&1 || true
+journalctl -b --no-pager > "$WORK/journal-live.txt" 2>&1 || true
+journalctl -b -p 3 --no-pager > "$WORK/journal-errors.txt" 2>&1 || true
+
+tg_info "hardware"
+lspci -nnk > "$WORK/lspci.txt" 2>&1 || true
+lsusb > "$WORK/lsusb.txt" 2>&1 || true
+dmidecode > "$WORK/dmidecode.txt" 2>&1 || true
+sensors > "$WORK/sensors.txt" 2>&1 || true
+free -h > "$WORK/free.txt" 2>&1 || true
+
+if tg_is_mounted "$TG_MOUNT"; then
+  tg_info "установленная система в $TG_MOUNT"
+  mkdir -p "$WORK/target"
+  for f in etc/os-release etc/fstab etc/default/grub etc/mkinitcpio.conf; do
+    [[ -f "$TG_MOUNT/$f" ]] && mkdir -p "$WORK/target/$(dirname "$f")" && cp -a "$TG_MOUNT/$f" "$WORK/target/$f"
+  done
+  ls -lah "$TG_MOUNT/boot" > "$WORK/target/boot-ls.txt" 2>&1 || true
+  find "$TG_MOUNT/boot" -maxdepth 2 -type f -printf '%p %s\n' > "$WORK/target/boot-files.txt" 2>&1 || true
+  tail -n 200 "$TG_MOUNT/var/log/pacman.log" > "$WORK/target/pacman-tail.txt" 2>&1 || true
+  systemctl --root="$TG_MOUNT" --failed --no-legend > "$WORK/target/failed-units.txt" 2>&1 || true
+  efibootmgr -v > "$WORK/target/efibootmgr.txt" 2>&1 || true
+fi
+
+tar czf "$OUT" -C "$WORK" .
+chmod 600 "$OUT"
+tg_ok "архив: $OUT"
+echo "Передайте его в поддержку или используйте в triglav-ask."

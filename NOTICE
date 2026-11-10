@@ -1,0 +1,16 @@
+Triglav Live
+Copyright (c) 2026 Triglav Labs
+
+This image is built on top of Arch Linux (https://archlinux.org) using the
+archiso releng profile. Arch Linux and its packages are distributed under their
+respective licenses.
+
+TriglavCode is an unofficial fork of opencode (https://opencode.ai), Copyright
+its respective authors, distributed under the MIT License. The TriglavCode
+binary embedded in the ISO is downloaded from:
+  https://github.com/DonatoDiaz/triglavcode/releases
+
+Triglav branding assets are Copyright Triglav Labs.
+
+The build scripts in this repository are licensed under the MIT License; see
+LICENSE.

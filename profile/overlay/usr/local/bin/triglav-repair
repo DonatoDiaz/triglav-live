@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# triglav-repair — guided repair actions for a broken Arch installation.
+set -uo pipefail
+source /usr/local/lib/triglav/common.sh
+
+usage() {
+  cat <<'EOF'
+triglav-repair — ремонт установленной системы.
+
+Использование:
+  triglav-repair menu                 интерактивное меню
+  triglav-repair boot                 переустановить загрузчик + initramfs
+  triglav-repair fsck [dev|--all]     проверить/починить файловые системы
+  triglav-repair pacman               починить pacman (lock, ключи, база)
+  triglav-repair fstab                перегенерировать /etc/fstab
+  triglav-repair password [user]      сбросить пароль пользователя
+  triglav-repair snapshot             btrfs-снимок перед ремонтом
+  triglav-repair rescue-disks SRC DST клонировать диск через ddrescue
+  triglav-repair logs                 собрать логи в архив (triglav-collect)
+  triglav-repair chroot               смонтировать и войти в arch-chroot
+
+Опции:
+  --dev /dev/sda2   целевой root-раздел
+  --yes             не спрашивать подтверждения (осторожно)
+  --repair          для fsck: разрешить опасный ремонт btrfs
+EOF
+}
+
+TARGET_DEV=""
+FS_REPAIR=0
+ARGS=()
+CMD=""
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    --yes) TG_ASSUME_YES=1 ;;
+    --repair) FS_REPAIR=1 ;;
+    --dev) NEXT_IS_DEV=1 ;;
+    /dev/*) TARGET_DEV="$arg"; NEXT_IS_DEV=0 ;;
+    *)
+      if [[ "${NEXT_IS_DEV:-0}" == "1" ]]; then TARGET_DEV="$arg"; NEXT_IS_DEV=0
+      elif [[ -z "$CMD" ]]; then CMD="$arg"
+      else ARGS+=("$arg"); fi
+      ;;
+  esac
+done
+
+mount_if_needed() {
+  if tg_is_mounted "$TG_MOUNT"; then
+    tg_dim "$TG_MOUNT уже смонтирован"
+    return 0
+  fi
+  if [[ -n "$TARGET_DEV" ]]; then
+    tg_mount_root "$TARGET_DEV" || return 1
+  else
+    tg_warn "$TG_MOUNT не смонтирован — запускаю выбор раздела"
+    triglav-mount || return 1
+  fi
+  tg_mount_efi || true
+}
+
+detect_efi_dir() {
+  if [[ -d "$TG_MOUNT/boot/EFI" ]]; then echo /boot
+  elif [[ -d "$TG_MOUNT/efi/EFI" ]]; then echo /efi
+  elif [[ -d "$TG_MOUNT/boot/efi/EFI" ]]; then echo /boot/efi
+  else echo /boot; fi
+}
+
+repair_boot() {
+  tg_need_root "$@"
+  mount_if_needed || return 1
+  local efi_dir; efi_dir="$(detect_efi_dir)"
+  local uefi=0; [[ -d /sys/firmware/efi ]] && uefi=1
+
+  tg_section "Анализ загрузчика"
+  echo "UEFI: $([[ $uefi == 1 ]] && echo да || echo нет)"
+  echo "EFI в системе: $efi_dir"
+  if [[ -d "$TG_MOUNT/boot/loader/entries" || -f "$TG_MOUNT/boot/EFI/systemd/systemd-bootx64.efi" ]]; then
+    echo "bootloader: systemd-boot"
+    BOOTLOADER=systemd-boot
+  elif [[ -d "$TG_MOUNT/boot/grub" || -f "$TG_MOUNT/etc/default/grub" ]]; then
+    echo "bootloader: GRUB"
+    BOOTLOADER=grub
+  else
+    echo "bootloader: не определён"
+    BOOTLOADER=unknown
+  fi
+
+  tg_section "Initramfs"
+  if tg_confirm "Пересобрать initramfs (mkinitcpio -P)?"; then
+    arch-chroot "$TG_MOUNT" mkinitcpio -P || tg_err "mkinitcpio завершился с ошибкой"
+  fi
+
+  tg_section "Загрузчик"
+  case "$BOOTLOADER" in
+    systemd-boot)
+      tg_info "bootctl install/update"
+      arch-chroot "$TG_MOUNT" bootctl --esp-path="$efi_dir" install 2>/dev/null \
+        || arch-chroot "$TG_MOUNT" bootctl install \
+        || tg_err "bootctl install не удался"
+      arch-chroot "$TG_MOUNT" bootctl update 2>/dev/null || true
+      ;;
+    grub)
+      if [[ $uefi == 1 ]]; then
+        tg_info "grub-install (UEFI, EFI=$efi_dir)"
+        arch-chroot "$TG_MOUNT" grub-install --target=x86_64-efi \
+          --efi-directory="$efi_dir" --bootloader-id=GRUB --recheck \
+          || tg_err "grub-install (UEFI) не удался"
+      else
+        local root_src disk
+        root_src="$(findmnt -no SOURCE "$TG_MOUNT")"
+        disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)"
+        if [[ -n "$disk" ]]; then
+          tg_info "grub-install (BIOS, /dev/$disk)"
+          arch-chroot "$TG_MOUNT" grub-install --target=i386-pc --recheck "/dev/$disk" \
+            || tg_err "grub-install (BIOS) не удался"
+        else
+          tg_err "не удалось определить диск для BIOS grub-install"
+        fi
+      fi
+      if [[ -f "$TG_MOUNT/etc/default/grub" ]]; then
+        arch-chroot "$TG_MOUNT" grub-mkconfig -o /boot/grub/grub.cfg \
+          || tg_err "grub-mkconfig не удался"
+      fi
+      ;;
+    unknown)
+      tg_warn "Загрузчик не найден."
+      if tg_confirm "Установить GRUB сейчас?"; then
+        if [[ $uefi == 1 ]]; then
+          arch-chroot "$TG_MOUNT" pacman -S --needed --noconfirm grub efibootmgr || return 1
+          arch-chroot "$TG_MOUNT" grub-install --target=x86_64-efi \
+            --efi-directory="$efi_dir" --bootloader-id=GRUB --recheck
+          arch-chroot "$TG_MOUNT" grub-mkconfig -o /boot/grub/grub.cfg
+        else
+          arch-chroot "$TG_MOUNT" pacman -S --needed --noconfirm grub || return 1
+          local root_src disk
+          root_src="$(findmnt -no SOURCE "$TG_MOUNT")"
+          disk="$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1)"
+          [[ -n "$disk" ]] && arch-chroot "$TG_MOUNT" grub-install --target=i386-pc --recheck "/dev/$disk"
+          arch-chroot "$TG_MOUNT" grub-mkconfig -o /boot/grub/grub.cfg
+        fi
+      fi
+      ;;
+  esac
+
+  tg_section "Проверка"
+  findmnt -R "$TG_MOUNT" | sed -n '1,30p'
+  tg_ok "boot repair завершён. Проверьте efibootmgr / bootctl status."
+}
+
+fsck_one() {
+  local dev="$1" type rc
+  type="$(tg_fs_type "$dev")"
+  [[ -n "$type" ]] || { tg_warn "неизвестная ФС: $dev"; return 1; }
+  if tg_is_mounted "$TG_MOUNT" && findmnt -rno SOURCE | grep -qx "$dev"; then
+    tg_err "$dev смонтирован. Размонтируйте (triglav-mount --umount) перед fsck."
+    return 1
+  fi
+  tg_section "fsck $dev ($type)"
+  case "$type" in
+    ext2|ext3|ext4)
+      tg_confirm "e2fsck -f -y $dev?" || return 0
+      e2fsck -f -y "$dev"; rc=$?
+      [[ $rc -le 2 ]] && tg_ok "e2fsck ok (rc=$rc)" || tg_err "e2fsck rc=$rc"
+      ;;
+    btrfs)
+      tg_info "btrfs check --readonly (безопасно)"
+      btrfs check --readonly "$dev"
+      if [[ $FS_REPAIR == 1 ]]; then
+        tg_warn "btrfs check --repair может уничтожить данные!"
+        if tg_confirm "Всё равно запустить btrfs check --repair?"; then
+          btrfs check --repair "$dev"
+        fi
+      else
+        tg_dim "Для ремонта добавьте --repair (опасно)."
+      fi
+      ;;
+    xfs)
+      xfs_repair -n "$dev" || true
+      tg_confirm "xfs_repair $dev?" || return 0
+      xfs_repair "$dev"; rc=$?
+      (( rc != 0 )) && tg_warn "если журнал грязный: xfs_repair -L $dev (потеря незаписанных данных)"
+      ;;
+    f2fs)
+      tg_confirm "fsck.f2fs -f $dev?" || return 0
+      fsck.f2fs -f "$dev"
+      ;;
+    *)
+      tg_warn "для $type нет автоматического fsck"
+      ;;
+  esac
+}
+
+repair_fsck() {
+  tg_need_root "$@"
+  local targets=()
+  if [[ -n "$TARGET_DEV" ]]; then
+    targets=("$TARGET_DEV")
+  elif [[ "${ARGS[0]:-}" == "--all" ]]; then
+    mapfile -t targets < <(tg_root_candidates | cut -f1)
+  else
+    mapfile -t targets < <(tg_root_candidates | cut -f1)
+    if [[ ${#targets[@]} -gt 1 ]]; then
+      tg_info "найдено несколько ФС:"
+      printf '  %s\n' "${targets[@]}"
+      tg_dim "укажите раздел: triglav-repair fsck /dev/sdXN  или --all"
+      return 1
+    fi
+  fi
+  [[ ${#targets[@]} -gt 0 ]] || { tg_err "нет целей"; return 1; }
+  local t
+  for t in "${targets[@]}"; do fsck_one "$t"; done
+}
+
+repair_pacman() {
+  tg_need_root "$@"
+  mount_if_needed || return 1
+  tg_section "Pacman: блокировки"
+  if [[ -f "$TG_MOUNT/var/lib/pacman/db.lck" ]]; then
+    tg_warn "найден db.lck"
+    if tg_confirm "Удалить $TG_MOUNT/var/lib/pacman/db.lck?"; then
+      rm -f "$TG_MOUNT/var/lib/pacman/db.lck" && tg_ok "удалён"
+    fi
+  else
+    tg_ok "блокировок нет"
+  fi
+
+  tg_section "Pacman: база и ключи"
+  arch-chroot "$TG_MOUNT" pacman -Syy || tg_warn "pacman -Syy не удался"
+  if tg_confirm "Обновить ключи archlinux-keyring?"; then
+    arch-chroot "$TG_MOUNT" pacman-key --init
+    arch-chroot "$TG_MOUNT" pacman-key --populate archlinux
+    arch-chroot "$TG_MOUNT" pacman -S --noconfirm archlinux-keyring
+  fi
+  arch-chroot "$TG_MOUNT" pacman -Dk || true
+
+  if tg_confirm "Переустановить ядро и прошивки (linux, linux-firmware)?"; then
+    arch-chroot "$TG_MOUNT" pacman -S --noconfirm linux linux-firmware
+    arch-chroot "$TG_MOUNT" mkinitcpio -P
+  fi
+}
+
+repair_fstab() {
+  tg_need_root "$@"
+  mount_if_needed || return 1
+  tg_section "Перегенерация fstab"
+  local fstab="$TG_MOUNT/etc/fstab"
+  if [[ -f "$fstab" ]]; then
+    cp -a "$fstab" "$fstab.bak.$(date +%Y%m%d-%H%M%S)"
+    tg_ok "резервная копия: $fstab.bak.*"
+  fi
+  genfstab -U "$TG_MOUNT" > "$fstab"
+  echo "--- новый fstab ---"
+  cat "$fstab"
+  tg_ok "fstab обновлён"
+}
+
+repair_password() {
+  tg_need_root "$@"
+  mount_if_needed || return 1
+  local user="${ARGS[0]:-root}"
+  tg_section "Сброс пароля: $user"
+  tg_warn "пароль будет изменён в $TG_MOUNT"
+  tg_confirm "Продолжить?" || return 0
+  arch-chroot "$TG_MOUNT" passwd "$user"
+}
+
+repair_snapshot() {
+  tg_need_root "$@"
+  mount_if_needed || return 1
+  local dev type
+  dev="$(findmnt -no SOURCE "$TG_MOUNT")"
+  type="$(tg_fs_type "$dev")"
+  if [[ "$type" != "btrfs" ]]; then
+    tg_warn "корень не btrfs ($type) — снимок не создаётся"
+    return 1
+  fi
+  mkdir -p "$TG_MOUNT/.snapshots"
+  local name="pre-repair-$(date +%Y%m%d-%H%M%S)"
+  tg_info "создаю снимок $name"
+  btrfs subvolume snapshot -r "$TG_MOUNT" "$TG_MOUNT/.snapshots/$name" \
+    && tg_ok "снимок: /.snapshots/$name"
+}
+
+repair_rescue_disks() {
+  tg_need_root "$@"
+  local src="${ARGS[0]:-}" dst="${ARGS[1]:-}"
+  [[ -n "$src" && -n "$dst" ]] || { tg_err "использование: triglav-repair rescue-disks SRC DST"; return 1; }
+  tg_have ddrescue || { tg_err "ddrescue не установлен"; return 1; }
+  tg_warn "SRC=$src будет скопирован на DST=$dst. Данные на DST будут уничтожены."
+  tg_confirm "Продолжить?" || return 0
+  local map="/root/triglav-reports/ddrescue-$(basename "$src")-$(date +%Y%m%d-%H%M%S).map"
+  mkdir -p "$(dirname "$map")"
+  ddrescue -f -n -r3 "$src" "$dst" "$map"
+  tg_ok "готово. Если есть ошибки: повторите с '-r3' без '-n'."
+}
+
+repair_chroot() {
+  tg_need_root "$@"
+  mount_if_needed || return 1
+  tg_info "вход в arch-chroot $TG_MOUNT"
+  arch-chroot "$TG_MOUNT"
+}
+
+menu() {
+  while true; do
+    cat <<EOF
+
+${C_P}TRIGLAV REPAIR${C_RESET}
+  1) Диагностика (triglav-doctor)
+  2) Смонтировать систему (triglav-mount)
+  3) Починить загрузчик + initramfs
+  4) Проверить ФС (fsck)
+  5) Починить pacman
+  6) Перегенерировать fstab
+  7) Сбросить пароль
+  8) Снимок btrfs
+  9) Собрать логи
+  c) Войти в arch-chroot
+  q) Выход
+EOF
+    read -r -p "Выбор: " ch
+    case "$ch" in
+      1) triglav-doctor ;;
+      2) triglav-mount || true ;;
+      3) repair_boot ;;
+      4) repair_fsck ;;
+      5) repair_pacman ;;
+      6) repair_fstab ;;
+      7) read -r -p "Пользователь [root]: " u; ARGS=("${u:-root}"); repair_password ;;
+      8) repair_snapshot ;;
+      9) triglav-collect ;;
+      c|C) repair_chroot ;;
+      q|Q) exit 0 ;;
+      *) tg_warn "нет такого пункта" ;;
+    esac
+    echo
+    read -r -p "Enter — продолжить..." _
+  done
+}
+
+case "${CMD:-menu}" in
+  menu) menu ;;
+  boot) repair_boot "$@" ;;
+  fsck) repair_fsck "$@" ;;
+  pacman) repair_pacman "$@" ;;
+  fstab) repair_fstab "$@" ;;
+  password) repair_password "$@" ;;
+  snapshot) repair_snapshot "$@" ;;
+  rescue-disks|rescue) repair_rescue_disks "$@" ;;
+  logs|collect) triglav-collect "$@" ;;
+  chroot) repair_chroot "$@" ;;
+  *) usage; exit 1 ;;
+esac

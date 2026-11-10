@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# triglav-mount — find and mount an installed Linux root (and its EFI partition).
+set -euo pipefail
+source /usr/local/lib/triglav/common.sh
+
+usage() {
+  cat <<'EOF'
+triglav-mount — смонтировать установленную систему для chroot/ремонта.
+
+Использование:
+  triglav-mount                интерактивный выбор раздела
+  triglav-mount --auto         выбрать автоматически
+  triglav-mount --dev /dev/sda2
+  triglav-mount --umount       размонтировать /mnt
+  triglav-mount --status       показать текущее состояние
+
+После монтирования: arch-chroot /mnt
+EOF
+}
+
+list_candidates() {
+  tg_section "Кандидаты на установленный Linux"
+  local i=1
+  local -a devs=()
+  while IFS=$'\t' read -r dev fstype size; do
+    printf '  %2d) %-16s %-6s %-10s %s\n' "$i" "$dev" "$fstype" "$size" \
+      "$(lsblk -no LABEL "$dev" 2>/dev/null | head -1)"
+    devs+=("$dev")
+    i=$((i + 1))
+  done < <(tg_root_candidates)
+  if [[ ${#devs[@]} -eq 0 ]]; then
+    tg_err "не найдено разделов с ext4/btrfs/xfs/f2fs"
+    return 1
+  fi
+  printf '%s\n' "${devs[@]}" > /tmp/triglav-root-candidates
+}
+
+select_candidate() {
+  list_candidates
+  local -a devs=()
+  mapfile -t devs < /tmp/triglav-root-candidates
+  if [[ ${#devs[@]} -eq 1 ]]; then
+    printf '%s' "${devs[0]}"
+    return 0
+  fi
+  local choice
+  read -r -p "Выберите раздел [1-${#devs[@]}]: " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] || { tg_err "неверный выбор"; return 1; }
+  local idx=$((choice - 1))
+  [[ $idx -ge 0 && $idx -lt ${#devs[@]} ]] || { tg_err "неверный выбор"; return 1; }
+  printf '%s' "${devs[$idx]}"
+}
+
+show_status() {
+  tg_section "Состояние $TG_MOUNT"
+  if tg_is_mounted "$TG_MOUNT"; then
+    findmnt "$TG_MOUNT" || true
+    echo
+    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT | sed -n '1,40p'
+    if [[ -f "$TG_MOUNT/etc/os-release" ]]; then
+      # shellcheck disable=SC1091
+      . "$TG_MOUNT/etc/os-release"
+      tg_ok "система: ${PRETTY_NAME:-?}"
+    fi
+  else
+    tg_warn "$TG_MOUNT не смонтирован"
+  fi
+}
+
+MODE=interactive
+DEV=""
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    --auto) MODE=auto ;;
+    --umount) MODE=umount ;;
+    --status) MODE=status ;;
+    --dev) MODE=dev ;;
+    /dev/*) DEV="$arg"; MODE=dev ;;
+    *) tg_err "неизвестный аргумент: $arg"; usage; exit 1 ;;
+  esac
+done
+
+tg_need_root "$@"
+
+case "$MODE" in
+  status) show_status ;;
+  umount) tg_umount_root; tg_ok "готово" ;;
+  dev)
+    [[ -n "$DEV" ]] || { tg_err "укажите --dev /dev/xxx"; exit 1; }
+    tg_mount_root "$DEV"
+    tg_mount_efi || true
+    show_status
+    ;;
+  auto)
+    mapfile -t devs < <(tg_root_candidates | cut -f1)
+    if [[ ${#devs[@]} -eq 0 ]]; then
+      tg_err "кандидаты не найдены"
+      exit 1
+    fi
+    # Prefer the largest partition.
+    best="${devs[0]}"
+    best_size=0
+    for d in "${devs[@]}"; do
+      s=$(lsblk -bno SIZE "$d" 2>/dev/null | head -1)
+      s=${s:-0}
+      if (( s > best_size )); then best="$d"; best_size=$s; fi
+    done
+    tg_mount_root "$best"
+    tg_mount_efi || true
+    show_status
+    ;;
+  interactive)
+    dev="$(select_candidate)" || exit 1
+    tg_mount_root "$dev"
+    tg_mount_efi || true
+    show_status
+    cat <<EOF
+
+Дальше:
+  arch-chroot $TG_MOUNT          # войти в систему
+  triglav-repair boot            # переустановить загрузчик
+  triglav-repair fsck            # проверить ФС
+  triglav-doctor                 # полный отчёт
+EOF
+    ;;
+esac

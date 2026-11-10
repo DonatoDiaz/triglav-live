@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# triglav-ai-setup — configure an OpenAI-compatible AI provider for TriglavCode.
+set -euo pipefail
+source /usr/local/lib/triglav/common.sh
+
+ENV_FILE="/root/.config/triglav/ai.env"
+CFG_DIR="/root/.config/opencode"
+CFG="$CFG_DIR/opencode.jsonc"
+
+show() {
+  if [[ -f "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1091
+    source "$ENV_FILE"
+    tg_section "Текущая конфигурация"
+    echo "base URL: ${TRIGLAV_BASE_URL:-?}"
+    echo "model:    ${TRIGLAV_MODEL_ID:-?}"
+    echo "api key:  ${TRIGLAV_API_KEY:+установлен}${TRIGLAV_API_KEY:-не установлен}"
+    echo "config:   $CFG"
+  else
+    tg_warn "AI ещё не настроен ($ENV_FILE отсутствует)"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+triglav-ai-setup — настроить AI-провайдера для TriglavCode.
+
+  triglav-ai-setup                 интерактивно
+  triglav-ai-setup --show          показать текущую конфигурацию
+  triglav-ai-setup --base-url URL --model ID --key KEY
+
+Подходит любой OpenAI-совместимый endpoint:
+  aitunnel, OpenRouter, OpenAI, локальный Ollama (/v1), vLLM, LM Studio.
+EOF
+}
+
+if [[ "${1:-}" == "--show" ]]; then show; exit 0; fi
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+
+BASE_URL=""
+MODEL_ID=""
+API_KEY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-url) BASE_URL="${2:-}"; shift 2 ;;
+    --model) MODEL_ID="${2:-}"; shift 2 ;;
+    --key) API_KEY="${2:-}"; shift 2 ;;
+    *) tg_err "неизвестный аргумент: $1"; usage; exit 1 ;;
+  esac
+done
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1091
+  source "$ENV_FILE"
+  BASE_URL="${BASE_URL:-${TRIGLAV_BASE_URL:-}}"
+  MODEL_ID="${MODEL_ID:-${TRIGLAV_MODEL_ID:-}}"
+  API_KEY="${API_KEY:-${TRIGLAV_API_KEY:-}}"
+fi
+
+if [[ -z "$BASE_URL" ]]; then
+  read -r -p "Base URL [https://api.aitunnel.ru/v1]: " BASE_URL
+  BASE_URL="${BASE_URL:-https://api.aitunnel.ru/v1}"
+fi
+if [[ -z "$MODEL_ID" ]]; then
+  read -r -p "Model ID [gpt-4o-mini]: " MODEL_ID
+  MODEL_ID="${MODEL_ID:-gpt-4o-mini}"
+fi
+if [[ -z "$API_KEY" ]]; then
+  read -r -s -p "API key: " API_KEY
+  echo
+fi
+
+mkdir -p "$(dirname "$ENV_FILE")" "$CFG_DIR" "/root/.local/share/opencode"
+chmod 700 "$(dirname "$ENV_FILE")"
+
+umask 077
+cat > "$ENV_FILE" <<EOF
+export TRIGLAV_BASE_URL='${BASE_URL}'
+export TRIGLAV_MODEL_ID='${MODEL_ID}'
+export TRIGLAV_API_KEY='${API_KEY}'
+EOF
+chmod 600 "$ENV_FILE"
+
+if ! tg_have jq; then
+  tg_err "нужен jq (triglav-tools install jq)"
+  exit 1
+fi
+
+jq -n --arg base "$BASE_URL" --arg model "$MODEL_ID" '{
+  "$schema": "https://opencode.ai/config.json",
+  provider: {
+    triglav: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "Triglav AI",
+      options: {
+        baseURL: $base,
+        apiKey: "{env:TRIGLAV_API_KEY}"
+      },
+      models: {
+        ($model): { name: $model }
+      }
+    }
+  },
+  model: ("triglav/" + $model)
+}' > "$CFG"
+chmod 600 "$CFG"
+
+tg_ok "конфигурация записана"
+echo "  env:    $ENV_FILE"
+echo "  config: $CFG"
+echo
+tg_info "проверка endpoint"
+if curl -fsS --max-time 10 -H "Authorization: Bearer ${API_KEY}" "${BASE_URL%/}/models" >/dev/null 2>&1; then
+  tg_ok "endpoint отвечает"
+else
+  tg_warn "endpoint не ответил (проверьте URL/ключ/сеть)"
+fi
+tg_dim "Проверка: triglavcode run -m triglav/${MODEL_ID} 'ответь ok'"

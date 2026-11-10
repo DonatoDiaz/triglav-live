@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# triglav — umbrella command for Triglav Live.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+TRIGLAV LIVE — аварийная среда
+
+  triglav doctor            диагностика
+  triglav mount             смонтировать установленную систему
+  triglav repair [menu]     ремонт
+  triglav ask "проблема"    один промпт → TriglavCode
+  triglav net               сеть / Wi-Fi
+  triglav tools             доустановка пакетов
+  triglav collect           архив логов
+  triglav code [args]       TriglavCode
+  triglav ai-setup          настроить AI-провайдера
+  triglav help              эта справка
+EOF
+}
+
+case "${1:-help}" in
+  help|-h|--help) usage ;;
+  doctor) shift; exec triglav-doctor "$@" ;;
+  mount) shift; exec triglav-mount "$@" ;;
+  repair) shift; exec triglav-repair "$@" ;;
+  ask) shift; exec triglav-ask "$@" ;;
+  net) shift; exec triglav-net "$@" ;;
+  tools) shift; exec triglav-tools "$@" ;;
+  collect) shift; exec triglav-collect "$@" ;;
+  code) shift; exec triglavcode "$@" ;;
+  ai-setup) shift; exec triglav-ai-setup "$@" ;;
+  code-fetch) shift; exec triglav-code-fetch "$@" ;;
+  *) echo "неизвестная команда: $1" >&2; usage; exit 1 ;;
+esac

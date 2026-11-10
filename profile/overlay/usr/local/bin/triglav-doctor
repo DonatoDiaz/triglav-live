@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# triglav-doctor — read-only health report for a broken Arch system.
+set -uo pipefail
+source /usr/local/lib/triglav/common.sh
+
+SHORT=0
+NO_SAVE=0
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      cat <<'EOF'
+triglav-doctor — собрать отчёт о железе, дисках, загрузке и системе.
+
+Использование:
+  triglav-doctor            полный отчёт (сохраняется в /root/triglav-reports)
+  triglav-doctor --short    краткая сводка
+  triglav-doctor --stdout   только на экран, без сохранения файла
+EOF
+      exit 0
+      ;;
+    --short) SHORT=1 ;;
+    --stdout) NO_SAVE=1 ;;
+  esac
+done
+
+REPORT="$(tg_report_path doctor)"
+OUT="/dev/stdout"
+if [[ $NO_SAVE -eq 0 ]]; then
+  OUT="$REPORT"
+  exec > >(tee "$REPORT")
+  exec 2>&1
+fi
+
+run() {
+  printf '$ %s\n' "$*"
+  "$@" 2>&1 | sed 's/^/  /'
+  printf '\n'
+}
+
+runsh() {
+  printf '$ %s\n' "$*"
+  bash -c "$*" 2>&1 | sed 's/^/  /'
+  printf '\n'
+}
+
+hr() { printf '%s\n' "────────────────────────────────────────────────────────────"; }
+
+hr
+printf 'TRIGLAV DOCTOR %s\n' "$TG_VERSION"
+printf 'время: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf 'live:  %s\n' "$(uname -srmo)"
+printf 'root:  %s\n' "$TG_MOUNT"
+hr
+
+tg_section "LIVE / BOOT MODE"
+if [[ -d /sys/firmware/efi ]]; then
+  echo "режим загрузки: UEFI"
+  runsh "efibootmgr -v 2>/dev/null | head -30"
+  SB=$(cat /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | od -An -t u1 2>/dev/null | awk '{print $NF}')
+  case "${SB:-}" in
+    1) echo "Secure Boot: включён" ;;
+    0) echo "Secure Boot: выключен" ;;
+    *) echo "Secure Boot: нет данных" ;;
+  esac
+else
+  echo "режим загрузки: BIOS/Legacy"
+fi
+runsh "cat /proc/cmdline"
+runsh "cat /etc/os-release | head -6"
+
+tg_section "CPU / MEMORY"
+runsh "lscpu | sed -n '1,22p'"
+runsh "free -h"
+runsh "cat /proc/meminfo | sed -n '1,6p'"
+
+tg_section "HARDWARE"
+runsh "lspci -nnk 2>/dev/null | sed -n '1,60p'"
+if [[ $SHORT -eq 0 ]]; then
+  runsh "lsusb 2>/dev/null"
+  runsh "timeout 10 dmidecode -t system -t bios 2>/dev/null | sed -n '1,60p'"
+  runsh "timeout 10 sensors 2>/dev/null | sed -n '1,40p'"
+fi
+
+tg_section "BLOCK DEVICES"
+runsh "lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,UUID,PARTUUID,MOUNTPOINT,MODEL"
+runsh "blkid"
+runsh "df -hT"
+runsh "df -i"
+
+tg_section "DISK HEALTH (SMART / NVMe)"
+for d in $(tg_disks); do
+  echo "## $d"
+  if tg_have smartctl; then
+    runsh "timeout 15 smartctl -H '$d' 2>&1 | sed -n '1,12p'"
+    if [[ $SHORT -eq 0 ]]; then
+      runsh "timeout 20 smartctl -A '$d' 2>&1 | sed -n '1,40p'"
+    fi
+  else
+    echo "smartctl не установлен"
+  fi
+done
+tg_have nvme && runsh "timeout 10 nvme list 2>/dev/null"
+if [[ $SHORT -eq 0 ]]; then
+  tg_have nvme && runsh "timeout 10 nvme smart-log /dev/nvme0 2>/dev/null | sed -n '1,30p'"
+fi
+
+tg_section "RAID / LVM / LUKS"
+runsh "cat /proc/mdstat 2>/dev/null"
+tg_have mdadm && runsh "mdadm --detail --scan 2>/dev/null"
+tg_have pvs && runsh "pvs 2>/dev/null; vgs 2>/dev/null; lvs 2>/dev/null"
+runsh "dmsetup ls --tree 2>/dev/null"
+runsh "lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINT | grep -i crypt || true"
+
+tg_section "INSTALLED SYSTEM CANDIDATES"
+run tg_root_candidates
+if tg_is_mounted "$TG_MOUNT"; then
+  echo "== $TG_MOUNT смонтирован =="
+  runsh "cat '$TG_MOUNT/etc/os-release' 2>/dev/null"
+  runsh "cat '$TG_MOUNT/etc/fstab' 2>/dev/null"
+  runsh "ls -lah '$TG_MOUNT/boot' 2>/dev/null | sed -n '1,40p'"
+  runsh "ls -lah '$TG_MOUNT/boot/EFI' 2>/dev/null; ls -lah '$TG_MOUNT/boot/loader/entries' 2>/dev/null; ls -lah '$TG_MOUNT/boot/grub' 2>/dev/null"
+  runsh "ls -lah '$TG_MOUNT/etc/mkinitcpio.conf' '$TG_MOUNT/etc/default/grub' 2>/dev/null"
+  runsh "find '$TG_MOUNT/boot' -maxdepth 1 -name 'vmlinuz*' -o -maxdepth 1 -name 'initramfs*' 2>/dev/null"
+  runsh "ls -l '$TG_MOUNT/var/lib/pacman/db.lck' 2>/dev/null; tail -n 30 '$TG_MOUNT/var/log/pacman.log' 2>/dev/null"
+  runsh "systemctl --root='$TG_MOUNT' --failed --no-legend 2>/dev/null | head -40"
+else
+  echo "$TG_MOUNT не смонтирован — см. triglav-mount"
+fi
+
+tg_section "PACMAN / KEYS (live)"
+runsh "ls -l /var/lib/pacman/db.lck 2>/dev/null"
+runsh "pacman -Q | wc -l"
+if [[ $SHORT -eq 0 ]]; then
+  runsh "timeout 60 pacman -Qkk 2>&1 | tail -n 20"
+fi
+
+tg_section "ERRORS / LOGS"
+runsh "dmesg --level=err,warn --color=never 2>/dev/null | tail -n $([[ $SHORT -eq 1 ]] && echo 25 || echo 60)"
+runsh "journalctl -p 3 -b --no-pager 2>/dev/null | tail -n $([[ $SHORT -eq 1 ]] && echo 25 || echo 60)"
+if [[ $SHORT -eq 0 ]]; then
+  runsh "journalctl -k -p 4 -b --no-pager 2>/dev/null | tail -n 40"
+fi
+
+tg_section "NETWORK"
+runsh "ip -br address"
+runsh "ip route"
+runsh "iw dev 2>/dev/null"
+runsh "getent hosts archlinux.org 2>/dev/null || true"
+runsh "ping -c 1 -W 2 1.1.1.1 2>&1 | tail -n 3"
+
+tg_section "SUMMARY"
+echo "Диски: $(tg_disks | wc -l)"
+echo "Кандидаты root: $(tg_root_candidates | wc -l)"
+echo "Монтирование: $(tg_is_mounted "$TG_MOUNT" && echo да || echo нет)"
+echo "Свободно RAM: $(free -h | awk '/^Mem:/{print $7}')"
+echo "Корень live: $(df -h / | awk 'NR==2{print $4}') свободно"
+
+hr
+if [[ $NO_SAVE -eq 0 ]]; then
+  printf 'Отчёт сохранён: %s\n' "$REPORT"
+fi

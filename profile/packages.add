@@ -1,0 +1,87 @@
+# Triglav Live additions on top of the archiso releng profile.
+# Keep this list lean: everything here ends up in the ISO.
+
+# --- disk / filesystem diagnostics and repair ---
+smartmontools
+nvme-cli
+hdparm
+sdparm
+parted
+gptfdisk
+dosfstools
+mtools
+exfatprogs
+ntfs-3g
+btrfs-progs
+xfsprogs
+f2fs-tools
+e2fsprogs
+cryptsetup
+lvm2
+mdadm
+testdisk
+ddrescue
+sleuthkit
+memtester
+
+# --- boot / system repair ---
+arch-install-scripts
+grub
+efibootmgr
+os-prober
+
+# --- hardware inspection ---
+lshw
+dmidecode
+pciutils
+usbutils
+lm_sensors
+ethtool
+
+# --- network ---
+iptables
+iwd
+iw
+wireless-regdb
+wpa_supplicant
+dhcpcd
+openssh
+rsync
+curl
+wget
+nmap
+mtr
+traceroute
+whois
+
+# --- console tooling ---
+htop
+btop
+tmux
+nano
+neovim
+jq
+ripgrep
+fd
+fzf
+git
+filesystem
+tree
+file
+lsof
+psmisc
+strace
+ltrace
+sysstat
+iotop
+ncdu
+pacman-contrib
+bash-completion
+man-db
+dialog
+libnewt
+7zip
+unzip
+zip
+zstd
+xz
